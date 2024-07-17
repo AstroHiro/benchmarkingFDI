@@ -1,5 +1,5 @@
 import numpy as np
-from Hiro3.helper_functions import rk4
+from helper_functions import rk4
 import time
 def initial_condition(bm):
     t0 = 0

@@ -1,10 +1,10 @@
 import numpy as np
 import control
-from Hiro3.superClasses.residual_helpers import residual_helpers
-from Hiro3.superClasses.dynamics_helpers import dynamics_helpers
-from Hiro3.superClasses.parameters_helpers import initialization_helpers
-from Hiro3.superClasses.lagrange_helper import lagrange_helper
-from Hiro3.superClasses.get_initial_params import get_initial_params
+from superClasses.residual_helpers import residual_helpers
+from superClasses.dynamics_helpers import dynamics_helpers
+from superClasses.parameters_helpers import initialization_helpers
+from superClasses.lagrange_helper import lagrange_helper
+from superClasses.get_initial_params import get_initial_params
 
 class Benchmark(residual_helpers, dynamics_helpers, initialization_helpers, lagrange_helper, get_initial_params):
     def __init__(self, mu, Nsc=1):

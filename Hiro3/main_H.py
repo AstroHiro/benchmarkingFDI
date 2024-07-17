@@ -1,13 +1,13 @@
 from benchmark import Benchmark
 from plotting import plot_positions,plot_residualfilter_j
-from Hiro3.trajectories import initial_condition,integration,target_traj_for_relative_dynamics,nominal_traj_and_faults
+from trajectories import initial_condition,integration,target_traj_for_relative_dynamics,nominal_traj_and_faults
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
 def main_Hiro():
     #global Nsc, bm
-    Nsc = 3
+    Nsc = 2
     mu_mars = 42828.375816
     mu_earth = 3.9860e+05
 
