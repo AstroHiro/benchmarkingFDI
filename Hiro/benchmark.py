@@ -7,9 +7,10 @@ Created on Sat Jul 13 02:28:58 2024
 
 import numpy as np
 import scipy as sp
-import cvxpy as cp
 import matplotlib.pyplot as plt
 import control
+
+rng_hiro = np.random.default_rng(seed=1995)
 
 class Benchmark():
     def __init__(self,mu,Nsc=1):
@@ -64,9 +65,9 @@ class Benchmark():
         q0_all = np.zeros(n_u)
         q0_dot_all = np.zeros(n_u)
         for j in range(p):
-            xj0 = -d0+2*d0*np.random.rand(1)[0]
-            yj0 = -d0+2*d0*np.random.rand(1)[0]
-            zj0 = -d0+2*d0*np.random.rand(1)[0]
+            xj0 = -d0+2*d0*rng_hiro.uniform()
+            yj0 = -d0+2*d0*rng_hiro.uniform()
+            zj0 = -d0+2*d0*rng_hiro.uniform()
             q0_all[nP*j:nP*(j+1)] = np.array([xj0,yj0,zj0])
         self.Qdfun = Qd
         self.q0_all = q0_all
@@ -123,7 +124,7 @@ class Benchmark():
         phi0 = 0
         dphi = 0
         for j in range(p):
-            if j > nidx/2*idx*(idx+1):
+            if j >= nidx/2*idx*(idx+1):
                 phi0 = phi0+dphi
                 idx = idx+1
             sat_num = nidx*idx
@@ -154,7 +155,7 @@ class Benchmark():
             p = self.Nsc
             nP = self.nP
             d_rand = 5
-            pos_rand = -d_rand+2*np.random.rand(p*nP)
+            pos_rand = -d_rand+2*rng_hiro.uniform(size=p*nP)
             pos_mat = pos_rand.reshape(p,nP)
             dists_rand = sp.spatial.distance.pdist(pos_mat)
             dists_rand_sq = sp.spatial.distance.squareform(dists_rand)
@@ -372,7 +373,25 @@ class Benchmark():
         Rfdtau = M_d@qr_ddot_d+C_d@qr_dot_d+G_d+D_d-Lap@s_d
         U = R_d.T@Rfdtau
         return U
-
+    
+    def expcontrolsingle(self,t,Xj,Xc,Uc,Qd_t):
+        # compute nominal control input of single deputy S/C
+        nX = self.nX
+        nP = self.nP
+        Lamdd = self.Lamdd
+        K1 = self.K1
+        Mj,Cj,Gj,Dj,_ = self.lagrangeMCGDj(t,Xj,Xc,Uc)
+        qj = Xj[0:nP]
+        q_dotj = Xj[nP:nX]
+        qd = Qd_t[0,:]
+        qd_dot = Qd_t[1,:]
+        qd_ddot = Qd_t[2,:]
+        qr_dot = qd_dot-Lamdd@(qj-qd)
+        qr_ddot = qd_ddot-Lamdd@(q_dotj-qd_dot)
+        s_d = q_dotj-qr_dot
+        U = Mj@qr_ddot+Cj@qr_ddot+Gj+Dj-K1@s_d
+        return U
+    
     def lagrangeMCGD(self,t,Xjall,Xc,Uc):
         # compute lagrangian dynamics of all deputy S/C
         p = self.Nsc
@@ -491,7 +510,36 @@ class Benchmark():
         I = np.identity(p)
         L = np.kron(I,M1)-np.kron(Aad,M2)
         return L
+        
+    def ilqrchief(self,t,Xc,Xcd,Ucd):
+        # compute nonlinear LQR for chief S/C
+        nX2d = self.nX2d
+        nU2d = self.nU2d
+        r = Xc[0]
+        Xc2d = np.array([Xc[0],Xc[1],Xc[2],Xc[5]])
+        Xcd2d = np.array([Xcd[0],Xcd[1],Xcd[2],Xcd[5]])
+        Ax = self.getdfdX(Xc2d,self.dynamicsfpolar2d)
+        B = np.array([[0,0],[1,0],[0,r],[0,0]])
+        Q = 1e-6*np.identity(nX2d)
+        R = np.identity(nU2d)
+        K,_,_ = control.lqr(Ax,B,Q,R)
+        U2d = Ucd[0:2]-K@(Xc2d-Xcd2d)
+        U = np.array([U2d[0],U2d[1],0])
+        return U
     
+    def dynamicsfpolar2d(self,Xc2d):
+        # compute 2d dynamics of chief S/C
+        mu = self.mu
+        r = Xc2d[0]
+        vx = Xc2d[1]
+        h = Xc2d[2]
+        drdt = vx
+        dvxdt = -mu/r**2+h**2/r**3
+        dhdt = 0
+        dthdt = h/r**2
+        f = np.array([drdt,dvxdt,dhdt,dthdt])
+        return f
+ 
     ##########################
     ####### FDI filter #######
     ##########################
@@ -501,7 +549,7 @@ class Benchmark():
         h = Yc[1]
         r = Yc[0]
         u2 = Uc[1]
-        k = 10
+        k = 1
         dxi_c_dt = r*u2+k*(h-xi_c)
         return dxi_c_dt
 
@@ -580,7 +628,7 @@ class Benchmark():
     ### FDI(R) simulation  ###
     ##########################    
     
-    def generatesignals(self,Nint,Nfaults,dist_period,fsize):
+    def generatesignals(self,Nint,Nfaults,dist_period,fsize,fsizemin):
         # generate fault and disturbance signals for FDI
         p = self.Nsc
         max_int = int(Nint/(dist_period))
@@ -588,14 +636,16 @@ class Benchmark():
         idx_m1jc_all = np.zeros((p+1,Nfaults))
         idx_wjc_all = np.zeros((p+1,Nfaults))
         for j in range(p+1):            
-            idx_m1jc = np.random.choice(idx_array,Nfaults,False)*dist_period
+            idx_m1jc = rng_hiro.choice(idx_array,Nfaults,False)*dist_period
             idx_m1jc.sort()
-            idx_wjc = np.random.choice(idx_array,Nfaults,False)*dist_period
+            idx_wjc = rng_hiro.choice(idx_array,Nfaults,False)*dist_period
             idx_wjc.sort()
             idx_m1jc_all[j,:] = idx_m1jc
             idx_wjc_all[j,:] = idx_wjc
-        m1jc_values = -fsize+2*fsize*np.random.rand(p+1,Nfaults)
-        wjc_values = -fsize+2*fsize*np.random.rand(p+1,Nfaults)
+        m1jc_values = -fsize+2*fsize*rng_hiro.uniform(size=(p+1,Nfaults))
+        wjc_values = -fsize+2*fsize*rng_hiro.uniform(size=(p+1,Nfaults))
+        m1jc_values = m1jc_values+np.sign(m1jc_values)*fsizemin
+        wjc_values = wjc_values+np.sign(wjc_values)*wjc_values
         idx_m1_signals = np.zeros(p+1,dtype=np.uint32)
         idx_w_signals = np.zeros(p+1,dtype=np.uint32)
         m1jc_his = np.zeros((p+1,Nint))
@@ -630,188 +680,7 @@ class Benchmark():
         k2 = dynamics(t+h/2.,X+k1*h/2.,U)
         k3 = dynamics(t+h/2.,X+k2*h/2.,U)
         k4 = dynamics(t+h,X+k3*h,U)
-        return t+h,X+h*(k1+2.*k2+2.*k3+k4)/6.
-    
-    ##########################
-    ###### soft landing ######
-    ##########################
-    
-    def dynamicsf2dscaled(self,t,X,Cs):
-        Cr = Cs[0]
-        Cv = Cs[1]
-        Ch = Cs[2]
-        Cth = Cs[3]
-        r = X[0]
-        v = X[1]
-        h = X[2]
-        f1 = (Cv/Cr)*v
-        f2 = ((Ch**2/Cr**3)*h**2/r**3-(self.mu/Cr**2)/r**2)/Cv
-        f3 = 0
-        f4 = ((Ch/Cr**2)*h/r**2)/Cth
-        f = np.array([f1,f2,f3,f4])
-        return f
-    
-    def dynamicsB2dscaled(self,Cs):
-        Cr = Cs[0]
-        Cv = Cs[1]
-        Ch = Cs[2]
-        B = np.array([[0,0],[1/Cv,0],[0,Cr/Ch],[0,0]])
-        return B
-    
-    def softlandingscp(self,X0,Xf):
-        K = 1
-        N = 1000
-        nX2d = self.nX2d
-        nU2d = self.nU2d
-        p = self.Nsc
-        r0 = X0[0]
-        h0 = X0[2]
-        Cv = np.sqrt(self.mu/r0)
-        Cs = np.array([r0,Cv,h0,2*np.pi])
-        t0 = 0
-        X0_scaled = X0/Cs
-        Xf_scaled = Xf/Cs
-        t = t0
-        X = X0_scaled
-        Xini = np.zeros((N+1,nX2d))
-        Xini[0,:] = X
-        dynamicsf = lambda X: self.dynamicsf2dscaled(t,X,Cs)
-        B = self.dynamicsB2dscaled(Cs)
-        dynamics = lambda t,X,U: dynamicsf(X)+B@U
-        dt = self.h
-        for n in range(N):
-            U = np.zeros(2)
-            t,X = self.rk4(t,X,U,dynamics)
-            Xini[n+1,:] = X
-        Xps = Xini
-        Xf_scaled[3] = X[3]
-        #xini = Xini[:,0]*Cs[0]*np.cos(Xini[:,3]*Cs[3])
-        #yini = Xini[:,0]*Cs[0]*np.sin(Xini[:,3]*Cs[3])
-        #plt.figure()
-        #plt.plot(xini,yini)
-        #plt.show()
-        Cp = 10000
-        Tregion = 0.1
-        Xss = []
-        Uss = []
-        dth = np.deg2rad(0.08)
-        Nsc_half = p/2        
-        for j in range(p+1):
-            Xf_scaled[3] = Xini[N,3]+(j-Nsc_half)*dth
-            Xs = cp.Variable((N+1,nX2d))
-            Us = cp.Variable((N,nU2d))
-            penalty = cp.Variable(1)
-            constraints = []
-            constraints.append(Xs[0,:] == X0_scaled)
-            #constraints.append(cp.norm(Xs[N,:]-Xf_scaled) <= penalty)
-            #J = Cp*penalty**2
-            constraints.append(Xs[N,:] == Xf_scaled)
-            J = 0
-            for n in range(N):
-                Xn = Xs[n,:]
-                Xnp1 = Xs[n+1,:]
-                Xp = Xps[n,:]
-                Un = Us[n,:]
-                dfdX = self.getdfdX(Xp,dynamicsf)
-                constraints.append(Xnp1 == Xn+(dynamicsf(Xp)+dfdX@(Xn-Xp)+B@Un)*dt)
-                #constraints.append(cp.norm(Xn-Xp) <= Tregion)
-                J += cp.sum_squares(Un)
-            objective = cp.Minimize(J)
-            prob = cp.Problem(objective,constraints)
-            result = prob.solve()
-            #Xps = Xs.value
-            Xss.append(Xs.value)
-            Uss.append(Us.value)
-            t = t0
-            X = X0_scaled
-            treal = np.zeros(N+1)
-            Xreal = np.zeros((N+1,nX2d))
-            treal[0] = t
-            Xreal[0,:] = X0_scaled
-            for n in range(N):
-                #Ax = self.getdfdX(X,dynamicsf)
-                #Xd = Xs.value[n,:]
-                Ud = Us.value[n,:]
-                #Q = np.identity(nX2d)*100
-                #R = np.identity(nU2d)
-                #K,_,_ = control.lqr(Ax,B,Q,R)
-                #U = Ud-K@(X-Xd)
-                U = Ud
-                t,X = self.rk4(t,X,U,dynamics)
-                treal[n+1] = t
-                Xreal[n+1,:] = X
-            rreal = Xreal[:,0]*Cs[0]
-            vreal = Xreal[:,1]*Cs[1]
-            hreal = Xreal[:,2]*Cs[2]
-            threal = Xreal[:,3]*Cs[3]
-            omreal = hreal/rreal**2
-            plt.figure()
-            plt.plot(treal,rreal)
-            plt.figure()
-            plt.plot(treal,vreal)
-            plt.figure()
-            plt.plot(treal,hreal)
-            plt.figure()
-            plt.plot(treal,threal)
-            plt.show()
-            plt.figure()
-            plt.plot(treal,omreal)
-            plt.show()
-            print("penalty",penalty.value)
-            print("J",J.value)
-        Xdcarss = []
-        thhiss = []
-        plt.figure()
-        for j in range(p+1):
-            Xsj = Xss[j] 
-            Xdcars = np.zeros((N+1,nX2d))
-            rrealj = Xsj[:,0]*Cs[0]
-            vrealj = Xsj[:,1]*Cs[1]
-            hrealj = Xsj[:,2]*Cs[2]
-            threalj = Xsj[:,3]*Cs[3]
-            omrealj = hrealj/rrealj**2
-            xrealj = rrealj*np.cos(threalj)
-            yrealj = rrealj*np.sin(threalj)
-            vxrealj = vrealj*np.cos(threalj)-rrealj*omrealj*np.sin(threalj)
-            vyrealj = vrealj*np.sin(threalj)+rrealj*omrealj*np.cos(threalj)
-            plt.plot(xrealj,yrealj)
-            Xdcars[:,0] = xrealj
-            Xdcars[:,1] = yrealj
-            Xdcars[:,2] = vxrealj
-            Xdcars[:,3] = vyrealj
-            Xdcarss.append(Xdcars)
-            thhiss.append(threalj)
-        Xdcar_chief = Xdcarss[p]
-        thhis_chief = thhiss[p]
-        for j in range(p):
-            Xdcarj = Xdcarss[j]
-            Xrcar = Xdcarj-Xdcar_chief
-            Xjhis = np.zeros((N+1,nX2d))
-            for n in range(N+1):
-                Xrcar_n = Xrcar[n,:]
-                thn = thhis_chief[n]
-                Rot = np.array([[np.cos(thn),np.sin(thn)],[-np.sin(thn),np.cos(thn)]])
-                Xr = np.kron(np.identity(2),Rot)@Xrcar_n
-                #Xjhis[]
-        plt.show()
-        return Xs    
-    
-    def rad2car(self,vrad,th):
-        # express vrad in cartesian coordinate
-        # er = ex*np.cos(th)+ey*np.sin(th)
-        # eth = -ex*np.sin(th)+ey*np.cos(th)
-        Rot = np.array([[np.cos(th),-np.sin(th)],[np.sin(th),np.cos(th)]])
-        vcar = Rot@vrad
-        return vcar
-    
-    def car2rad(self,vcar,th):
-        # express vcar in polar coordinate
-        # ex = er*np.cos(th)-eth*np.sin(th)
-        # ey = er*np.sin(th)+eth*np.cos(th)
-        Rot = np.array([[np.cos(th),np.sin(th)],[-np.sin(th),np.cos(th)]])
-        vrad = Rot@vcar
-        return vrad
-        
+        return t+h,X+h*(k1+2.*k2+2.*k3+k4)/6. 
         
     ##########################
     #### unused functions ####
@@ -945,9 +814,19 @@ class Benchmark():
     
     def rad2car(self,vrad,th):
         # express vrad in cartesian coordinate
+        # er = ex*np.cos(th)+ey*np.sin(th)
+        # eth = -ex*np.sin(th)+ey*np.cos(th)
         Rot = np.array([[np.cos(th),-np.sin(th)],[np.sin(th),np.cos(th)]])
         vcar = Rot@vrad
         return vcar
+    
+    def car2rad(self,vcar,th):
+        # express vcar in polar coordinate
+        # ex = er*np.cos(th)-eth*np.sin(th)
+        # ey = er*np.sin(th)+eth*np.cos(th)
+        Rot = np.array([[np.cos(th),np.sin(th)],[-np.sin(th),np.cos(th)]])
+        vrad = Rot@vcar
+        return vrad
     
     def getXdt(self,t):
         # compute target trajectory
@@ -974,12 +853,19 @@ class Benchmark():
     
 if __name__ == "__main__":
     # simulation parameters
-    Nsc = 4 # number of S/C
+    Nsc = 24 # number of S/C
     mu_earth = 3.9860e+05 # gravitational constant of Earth
     mu_mars = 42828.375816 # gravitational constant of Mars 
     mu = mu_mars
     bm = Benchmark(mu,Nsc)
     t0 = 0
+    nX = bm.nX # number of states
+    nP = bm.nP # number of positions
+    nU = bm.nU = 3 # number of control inputs
+    nX2d = bm.nX2d = 4 # number of 2d states
+    nP2d = bm.nP2d = 2 # number of 2d positions
+    nU2d = bm.nU2d = 2 # number of 2d control inputs
+    nY = bm.nY = 3 # number of measurements 
     
     # chief S/C initial condition
     r0_earth = 6378 # radius of Earth
@@ -994,38 +880,37 @@ if __name__ == "__main__":
     th0 = 0
     Xc0 = np.array([r0,vx0,h0,Om0,i0,th0])
     
-    # soft landing target trajectory
-    omar = 870/(60*60)/r0_mars # rotation speed of Mars
-    hmar = r0_mars**2*omar
-    X0sl = np.array([r0,vx0,h0,np.pi/2])
-    Xfsl = np.array([r0_mars,0,hmar,0])
-    Xs = bm.softlandingscp(X0sl,Xfsl)
-    
     # deputy S/C initial conditions
     Xjcall0 = np.hstack((bm.Xjall0,Xc0))
-    xi_c0 = h0
+    xi_c0 = h0+1000
     Yjall0 = bm.measurementnet(t0,bm.Xjall0)
-    Zj2dall0 = np.zeros(4*Nsc)
+    Zj2dall0 = np.zeros(nX2d*Nsc)
     for j in range(Nsc):
-        Xj0 = bm.Xjall0[6*j:6*(j+1)]
-        Yj0 = Yjall0[3*j:3*(j+1)]
+        Xj0 = bm.Xjall0[nX*j:nX*(j+1)]
+        Yj0 = Yjall0[nY*j:nY*(j+1)]
         Xhatj2d0 = np.array([Xj0[0],Xj0[1],Xj0[3],Xj0[4]])
-        Zj2dall0[4*j:4*(j+1)] = Xhatj2d0-bm.Nj2d@Yj0
+        Zj2dall0[nX2d*j:nX2d*(j+1)] = Xhatj2d0-bm.Nj2d@Yj0
     
-    # target trajectory for relative dynamics
+    # target trajectories
     T = 2*np.pi/om0/10
     dt = bm.h
     Nint = int(T/dt)
-    Qd_t_his = np.zeros((3,3,Nint+1))
-    ti = 0
-    for i in range(Nint+1):
-        Qd_t_his[:,:,i] = bm.Qdfun(ti)
-        ti = ti+dt
+    ti = t0
+    Xcd = Xc0
+    Xcdhis = np.zeros((Nint+1,nX))
+    Qd_t_his = np.zeros((nP,nP,Nint+1))
+    Xcdhis[0,:] = Xc0
+    Qd_t_his[:,:,0] = bm.Qdfun(ti)
+    for i in range(Nint):
+        dynamics_rc = lambda t,X,U: bm.dynamicspolar3d(t,X,U,0,0)
+        ti,Xcd = bm.rk4(ti,Xcd,np.zeros(nU),dynamics_rc)
+        Xcdhis[i+1,:] = Xcd
+        Qd_t_his[:,:,i+1] = bm.Qdfun(ti)
     
     # initialization
     this = np.zeros(Nint+1)
-    Xjcall_his = np.zeros((Nint+1,6*(Nsc+1)))
-    Zj2dall_his = np.zeros((Nint+1,4*Nsc))
+    Xjcall_his = np.zeros((Nint+1,nX*(Nsc+1)))
+    Zj2dall_his = np.zeros((Nint+1,nX2d*Nsc))
     res_jc_his = np.zeros((Nsc+1,Nint))
     this[0] = t0
     Xjcall_his[0,:] = Xjcall0
@@ -1034,25 +919,30 @@ if __name__ == "__main__":
     Xjcall = Xjcall0
     xi_c = xi_c0
     Zj2dall = Zj2dall0
+    Aadhis = np.zeros((Nsc,Nsc,Nint+1))
+    Aadhis[:,:,0] = bm.Aad
     
     # multi-S/C fault detection and isolation
     Nfaults = 10
     Nswitches = 100
     dist_period = 300
-    fsize = 0.3
-    m1jc_his,wjc_his = bm.generatesignals(Nint,Nfaults,dist_period,fsize)
+    fsize = 0.03
+    fsizemin = 0.01
+    m1jc_his,wjc_his = bm.generatesignals(Nint,Nfaults,dist_period,fsize,fsizemin)
     array_switches = np.arange(1,Nint-1)
-    idx_switches = np.random.choice(array_switches,Nswitches,False)
+    idx_switches = rng_hiro.choice(array_switches,Nswitches,False)
     idx_switches = set(idx_switches)
     
     # integration
     for k in range(Nint):
         if k in idx_switches:
             bm.changecommunication()
-        Uc = np.zeros(3)
-        Xjall = Xjcall[0:6*Nsc]
+        Xjall = Xjcall[0:nX*Nsc]
         Xj2dall = bm.R3d22d@Xjall
-        Xc = Xjcall[6*Nsc:6*(Nsc+1)]
+        Xc = Xjcall[nX*Nsc:nX*(Nsc+1)]
+        Xcd = Xcdhis[k,:]
+        Ucd = np.zeros(nU)
+        Uc = bm.ilqrchief(t,Xc,Xcd,Ucd)
         Qd_t = Qd_t_his[:,:,k]
         Ujall = bm.expcontrol(t,Xjall,Xc,Uc,Qd_t)
         Ujcall = np.hstack((Ujall,Uc))
@@ -1062,10 +952,10 @@ if __name__ == "__main__":
         Yjall = bm.measurementnet(t,Xjall)
         Xhatj2d_all = Zj2dall+bm.N2dall@bm.Ctrans@Yjall
         for j in range(Nsc):
-            Xj2d = Xj2dall[4*j:4*(j+1)]
-            Xhatj2d = Xhatj2d_all[4*j:4*(j+1)]
+            Xj2d = Xj2dall[nX2d*j:nX2d*(j+1)]
+            Xhatj2d = Xhatj2d_all[nX2d*j:nX2d*(j+1)]
             res_jc_his[j,k] = np.linalg.norm(Xhatj2d-Xj2d)
-            res_jc_his[Nsc,k] = np.linalg.norm(Yc[1]-xi_c)
+        res_jc_his[Nsc,k] = np.linalg.norm(Yc[1]-xi_c)
         m1jcall = m1jc_his[:,k]
         wjcall = wjc_his[:,k]
         dynamics_jc = lambda t,X,U: bm.dynamicsall(t,X,U,m1jcall,wjcall)
@@ -1078,40 +968,72 @@ if __name__ == "__main__":
         this[k+1] = t
         Xjcall_his[k+1,:] = Xjcall
         Zj2dall_his[k+1,:] = Zj2dall
+        Aadhis[:,:,k+1] = bm.Aad
     
+    # simulation results
+    np.save("data/this.npy",this)
+    np.save("data/Xjcall_his.npy",Xjcall_his)
+    np.save("data/Zj2dall_his.npy",Zj2dall_his)
+    np.save("data/res_jc_his.npy",res_jc_his)
+    np.save("data/Aadhis.npy",Aadhis)
+    np.save("data/m1jc_his.npy",m1jc_his)
+    np.save("data/wjc_his.npy",wjc_his)
+
     # figures
-    Xchis = Xjcall_his[:,6*Nsc:6*(Nsc+1)]
-    Xjallhis = Xjcall_his[:,0:6*Nsc]
+    Xchis = Xjcall_his[:,nX*Nsc:nX*(Nsc+1)]
+    Xjallhis = Xjcall_his[:,0:nX*Nsc]
     x3dhis = Xchis[:,0]*np.cos(Xchis[:,5])
     y3dhis = Xchis[:,0]*np.sin(Xchis[:,5])
     
     # chief residual filter
     fig,ax1 = plt.subplots()
     ax2 = ax1.twinx()
+    ax3 = ax1.twinx()
     ax1.plot(this[0:Nint],res_jc_his[Nsc,:],"C0")
     ax2.plot(this[0:Nint],m1jc_his[Nsc,:],"C1",linestyle="--")
-    ax2.plot(this[0:Nint],wjc_his[Nsc,:],"C2",linestyle="--")
+    ax3.plot(this[0:Nint],wjc_his[Nsc,:],"C2",linestyle="--")
     ax2.legend(["fault signal","disturbance signal"])
     ax1.set_xlabel("time")
-    ax1.set_ylabel("residual")
-    ax2.set_ylabel("fault and disturbance signal")
+    ax1.set_ylabel("residual",color="C0")
+    ax2.set_ylabel("fault signal",color="C1")
+    ax3.set_ylabel("disturbance signal",color="C2")
+    ax1.tick_params(axis='y',labelcolor="C0")
+    ax2.tick_params(axis='y',labelcolor="C1")
+    ax3.tick_params(axis='y',labelcolor="C2")
+    ax3.spines["right"].set_position(("outward",60))
+    plt.title("FDI filter of chief S/C")
     
     # deputy residual filter
     for j in range(Nsc):
         fig,ax1 = plt.subplots()
         ax2 = ax1.twinx()
+        ax3 = ax1.twinx()
         ax1.plot(this[0:Nint],res_jc_his[j,:],"C0")
         ax2.plot(this[0:Nint],m1jc_his[j,:],"C1",linestyle="--")
-        ax2.plot(this[0:Nint],wjc_his[j,:],"C2",linestyle="--")
+        ax3.plot(this[0:Nint],wjc_his[j,:],"C2",linestyle="--")
         ax2.legend(["fault signal","disturbance signal"])
         ax1.set_xlabel("time")
-        ax1.set_ylabel("residual")
-        ax2.set_ylabel("fault and disturbance signal")
+        ax1.set_ylabel("residual",color="C0")
+        ax2.set_ylabel("fault signal",color="C1")
+        ax3.set_ylabel("disturbance signal",color="C2")
+        ax1.tick_params(axis='y',labelcolor="C0")
+        ax2.tick_params(axis='y',labelcolor="C1")
+        ax3.tick_params(axis='y',labelcolor="C2")
+        ax3.spines["right"].set_position(("outward",60))
+        plt.title("FDI filter of deputy S/C #"+str(j+1))
         
-    # relative positions
+    # position plots
     plt.figure()
-    plt.plot(x3dhis,y3dhis,linestyle=':')
+    plt.plot(x3dhis,y3dhis)
+    plt.grid()
+    plt.xlabel("horizontal position (km)")
+    plt.ylabel("vertical position (km)")
+    plt.title("absolute position of deputy S/C")
     plt.figure()
     for j in range(Nsc):
-        Xjhis = Xjallhis[:,6*j:6*(j+1)]
+        Xjhis = Xjallhis[:,nX*j:nX*(j+1)]
         plt.plot(Xjhis[:,0],Xjhis[:,1])
+    plt.grid()
+    plt.xlabel("horizontal position (km)")
+    plt.ylabel("vertical position (km)")
+    plt.title("relative position of deputy S/C")
